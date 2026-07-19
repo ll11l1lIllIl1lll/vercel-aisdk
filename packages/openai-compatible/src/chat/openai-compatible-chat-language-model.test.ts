@@ -3209,6 +3209,130 @@ describe('doStream', () => {
       `);
   });
 
+  describe('onUnhandledStreamChunk', () => {
+    const contentChunk =
+      `data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"grok-3",` +
+      `"choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}\n\n`;
+    const finishChunk =
+      `data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"grok-3",` +
+      `"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n`;
+    // Vendor-specific frame that matches neither the chat completion schema
+    // nor the error schema. Tagged via `object`.
+    const billingFrame = `data: {"object":"billing.summary","billing":{"cost":{"total":"0.25"}}}\n\n`;
+    // Structurally malformed frame with no `object` tag.
+    const malformedFrame = `data: {"foo":"bar"}\n\n`;
+
+    function prepareResponse(chunks: string[]) {
+      server.urls['https://my.api.com/v1/chat/completions'].response = {
+        type: 'stream-chunks',
+        chunks: [...chunks, 'data: [DONE]\n\n'],
+      };
+    }
+
+    function typesOf(parts: Array<{ type: string }>) {
+      return parts.map(part => part.type);
+    }
+
+    it('errors on a vendor-specific frame by default', async () => {
+      prepareResponse([contentChunk, billingFrame, finishChunk]);
+
+      const { stream } = await provider('grok-3').doStream({
+        prompt: TEST_PROMPT,
+        includeRawChunks: false,
+      });
+
+      const parts = await convertReadableStreamToArray(stream);
+      expect(typesOf(parts)).toContain('error');
+    });
+
+    it('skips vendor-specific frames when set to skip-unknown', async () => {
+      prepareResponse([contentChunk, billingFrame, finishChunk]);
+
+      const model = createOpenAICompatible({
+        baseURL: 'https://my.api.com/v1/',
+        name: 'test-provider',
+        headers: { Authorization: `Bearer test-api-key` },
+        onUnhandledStreamChunk: 'skip-unknown',
+      })('grok-3');
+
+      const { stream } = await model.doStream({
+        prompt: TEST_PROMPT,
+        includeRawChunks: false,
+      });
+
+      const parts = await convertReadableStreamToArray(stream);
+      expect(typesOf(parts)).not.toContain('error');
+      expect(parts.filter(part => part.type === 'text-delta')).toMatchObject([
+        { delta: 'Hello' },
+      ]);
+    });
+
+    it('still errors on structurally malformed frames when set to skip-unknown', async () => {
+      prepareResponse([contentChunk, malformedFrame, finishChunk]);
+
+      const model = createOpenAICompatible({
+        baseURL: 'https://my.api.com/v1/',
+        name: 'test-provider',
+        headers: { Authorization: `Bearer test-api-key` },
+        onUnhandledStreamChunk: 'skip-unknown',
+      })('grok-3');
+
+      const { stream } = await model.doStream({
+        prompt: TEST_PROMPT,
+        includeRawChunks: false,
+      });
+
+      const parts = await convertReadableStreamToArray(stream);
+      expect(typesOf(parts)).toContain('error');
+    });
+
+    it('skips any malformed frame when set to skip-all', async () => {
+      prepareResponse([
+        contentChunk,
+        billingFrame,
+        malformedFrame,
+        finishChunk,
+      ]);
+
+      const model = createOpenAICompatible({
+        baseURL: 'https://my.api.com/v1/',
+        name: 'test-provider',
+        headers: { Authorization: `Bearer test-api-key` },
+        onUnhandledStreamChunk: 'skip-all',
+      })('grok-3');
+
+      const { stream } = await model.doStream({
+        prompt: TEST_PROMPT,
+        includeRawChunks: false,
+      });
+
+      const parts = await convertReadableStreamToArray(stream);
+      expect(typesOf(parts)).not.toContain('error');
+      expect(parts.filter(part => part.type === 'text-delta')).toMatchObject([
+        { delta: 'Hello' },
+      ]);
+    });
+
+    it('still errors on unparsable JSON even when set to skip-all', async () => {
+      prepareResponse([contentChunk, `data: {unparsable}\n\n`, finishChunk]);
+
+      const model = createOpenAICompatible({
+        baseURL: 'https://my.api.com/v1/',
+        name: 'test-provider',
+        headers: { Authorization: `Bearer test-api-key` },
+        onUnhandledStreamChunk: 'skip-all',
+      })('grok-3');
+
+      const { stream } = await model.doStream({
+        prompt: TEST_PROMPT,
+        includeRawChunks: false,
+      });
+
+      const parts = await convertReadableStreamToArray(stream);
+      expect(typesOf(parts)).toContain('error');
+    });
+  });
+
   it('should pass the messages and the model', async () => {
     prepareStreamResponse({ content: [] });
 

@@ -68,6 +68,22 @@ export type OpenAICompatibleChatConfig = {
   metadataExtractor?: MetadataExtractor;
 
   /**
+   * How to handle streaming chunks that match neither the chat completion
+   * schema nor the error schema. Some OpenAI-compatible providers interleave
+   * vendor-specific frames into the stream (e.g. billing summaries or
+   * keep-alive frames) that omit both `choices` and `error`.
+   *
+   * - `'error'` (default): emit an error part, preserving current behavior.
+   * - `'skip-unknown'`: skip only frames explicitly identified as non-chat
+   *   frames (an `object` field is present and is neither `chat.completion`
+   *   nor `chat.completion.chunk`). Structurally malformed frames still error.
+   * - `'skip-all'`: skip any frame lacking both `choices` and `error`.
+   *
+   * @default 'error'
+   */
+  onUnhandledStreamChunk?: 'error' | 'skip-unknown' | 'skip-all';
+
+  /**
    * Whether the model supports structured outputs.
    */
   supportsStructuredOutputs?: boolean;
@@ -447,6 +463,9 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV4 {
     const metadataExtractor =
       this.config.metadataExtractor?.createStreamExtractor();
 
+    const onUnhandledStreamChunk =
+      this.config.onUnhandledStreamChunk ?? 'error';
+
     const { responseHeaders, value: response } = await postJsonToApi({
       url: this.config.url({
         path: '/chat/completions',
@@ -570,6 +589,44 @@ export class OpenAICompatibleChatLanguageModel implements LanguageModelV4 {
 
             // handle failed chunk parsing / validation:
             if (!chunk.success) {
+              // Some providers interleave vendor-specific frames (e.g. billing
+              // summaries or keep-alive frames) that match neither the chat
+              // completion schema nor the error schema. Depending on the
+              // configured policy these can be skipped instead of surfacing an
+              // error. `rawValue` holds the parsed object when JSON parsing
+              // succeeded but schema validation failed; it is `undefined` when
+              // the JSON itself was unparseable (never skippable).
+              if (
+                onUnhandledStreamChunk !== 'error' &&
+                chunk.rawValue != null &&
+                typeof chunk.rawValue === 'object'
+              ) {
+                const raw = chunk.rawValue as Record<string, unknown>;
+                const hasChoices = 'choices' in raw;
+                const hasError = 'error' in raw;
+
+                if (
+                  onUnhandledStreamChunk === 'skip-all' &&
+                  !hasChoices &&
+                  !hasError
+                ) {
+                  return;
+                }
+
+                if (onUnhandledStreamChunk === 'skip-unknown') {
+                  const objectField = raw.object;
+                  const isKnownChatFrame =
+                    objectField === 'chat.completion' ||
+                    objectField === 'chat.completion.chunk';
+                  // Skip only frames explicitly tagged as something other than
+                  // a chat frame. Frames without an `object` field are left to
+                  // error so genuinely malformed responses are not swallowed.
+                  if (typeof objectField === 'string' && !isKnownChatFrame) {
+                    return;
+                  }
+                }
+              }
+
               finishReason = { unified: 'error', raw: undefined };
               controller.enqueue({ type: 'error', error: chunk.error });
               return;

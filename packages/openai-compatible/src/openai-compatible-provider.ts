@@ -87,6 +87,22 @@ export interface OpenAICompatibleProviderSettings {
   includeUsage?: boolean;
 
   /**
+   * How to handle streaming chunks that match neither the chat completion
+   * schema nor the error schema. Some OpenAI-compatible providers interleave
+   * vendor-specific frames into the stream (e.g. billing summaries or
+   * keep-alive frames) that omit both `choices` and `error`.
+   *
+   * - `'error'` (default): emit an error part, preserving current behavior.
+   * - `'skip-unknown'`: skip only frames explicitly identified as non-chat
+   *   frames (an `object` field is present and is neither `chat.completion`
+   *   nor `chat.completion.chunk`). Structurally malformed frames still error.
+   * - `'skip-all'`: skip any frame lacking both `choices` and `error`.
+   *
+   * @default 'error'
+   */
+  onUnhandledStreamChunk?: 'error' | 'skip-unknown' | 'skip-all';
+
+  /**
    * Whether the provider supports structured outputs in chat models.
    */
   supportsStructuredOutputs?: boolean;
@@ -171,6 +187,7 @@ export function createOpenAICompatible<
     new OpenAICompatibleChatLanguageModel(modelId, {
       ...getCommonModelConfig('chat'),
       includeUsage: options.includeUsage,
+      onUnhandledStreamChunk: options.onUnhandledStreamChunk,
       supportsStructuredOutputs: options.supportsStructuredOutputs,
       supportedUrls: options.supportedUrls,
       transformRequestBody: options.transformRequestBody,
